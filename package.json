@@ -1,0 +1,32 @@
+{
+  "name": "specos",
+  "version": "0.1.0",
+  "description": "CLI-based multi-agent SDLC orchestrator: spec-driven development, agent swarms in git worktrees, and a guardrail harness for end-to-end project delivery.",
+  "type": "module",
+  "bin": {
+    "specos": "./dist/cli/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli/index.ts",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.263",
+    "better-sqlite3": "^11.3.0",
+    "commander": "^12.1.0",
+    "keytar": "^7.9.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^22.7.4",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.2",
+    "vitest": "^2.1.1"
+  }
+}
