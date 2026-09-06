@@ -11,6 +11,25 @@ spec.md / Jira  →  spec.lock.json  →  task graph  →  worker agents (git wo
                                     reviewer agent  →  approval gate  →  merge
 ```
 
+## Quick install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/<org>/specOS/main/install.sh | bash
+```
+
+One command: clones (or updates) the repo, `npm install`, `npm run build`, and `npm link`s the
+`specos` command onto your PATH. Requires Node.js ≥ 20 and git. Update `<org>` once this repo is
+pushed to its real remote (`git remote add origin <url>` and push) — until then, run the same
+script locally instead:
+
+```bash
+git clone <this-repo-url> specOS && cd specOS && bash install.sh
+```
+
+Both forms are the same script (`install.sh` at the repo root) — the remote one just fetches it
+via curl first. See [Setup](#setup) below for the manual, step-by-step equivalent if you'd rather
+not run a script from the internet.
+
 ## How it works
 
 1. **SDD (spec-driven development)** — `specos spec add` parses a Markdown/text file (or pulls
