@@ -88,3 +88,12 @@ export async function listUnmergedPaths(repoRoot: string): Promise<string[]> {
 export async function commitMerge(repoRoot: string, message: string): Promise<void> {
   await git(repoRoot, ["commit", "-m", message]);
 }
+
+/** Force-deletes a local branch — destructive, discards any commits on it not reachable from elsewhere. */
+export async function deleteBranch(repoRoot: string, branch: string): Promise<void> {
+  await git(repoRoot, ["branch", "-D", branch]);
+}
+
+export async function pushBranch(repoRoot: string, remote: string, branch: string): Promise<void> {
+  await git(repoRoot, ["push", remote, branch]);
+}

@@ -6,6 +6,8 @@ import { registerPlanCommand } from "./commands/plan.js";
 import { registerRunCommand } from "./commands/run.js";
 import { registerSpecCommand } from "./commands/spec.js";
 import { registerAuthCommand } from "./commands/auth.js";
+import { registerResumeCommand } from "./commands/resume.js";
+import { registerRetryCommand } from "./commands/retry.js";
 
 const program = new Command();
 
@@ -16,6 +18,8 @@ registerAuthCommand(program);
 registerSpecCommand(program);
 registerPlanCommand(program);
 registerRunCommand(program);
+registerResumeCommand(program);
+registerRetryCommand(program);
 registerStatusCommand(program);
 
 program.parseAsync(process.argv).catch((err) => {

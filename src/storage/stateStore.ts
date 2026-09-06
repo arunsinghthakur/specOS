@@ -62,6 +62,15 @@ export class StateStore {
       .run({ id, status, worktreePath, branch, updatedAt: new Date().toISOString() });
   }
 
+  /** Forces a task back to "pending" and clears its worktree/branch — used by `specos retry` after discarding the old attempt. */
+  resetTask(id: string): void {
+    this.db
+      .prepare(
+        `UPDATE tasks SET status = 'pending', worktree_path = NULL, branch = NULL, updated_at = @updatedAt WHERE id = @id`,
+      )
+      .run({ id, updatedAt: new Date().toISOString() });
+  }
+
   getTask(id: string): TaskRecord | undefined {
     const row = this.db.prepare(`SELECT * FROM tasks WHERE id = ?`).get(id) as
       | { id: string; status: TaskStatus; worktree_path: string | null; branch: string | null; updated_at: string }
