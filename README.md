@@ -172,6 +172,80 @@ specos retry <taskId>       # discard a blocked/failed task's worktree+branch an
                              # pending, so the next `specos run` retries it from scratch
 ```
 
+## Worked example
+
+A minimal end-to-end run, start to finish, building a command-line todo app from scratch:
+
+```bash
+mkdir todo-app && cd todo-app
+git init -b main
+specos init --concurrency 2
+```
+
+`spec.md`:
+
+```markdown
+# Project Setup
+
+Set up a minimal Node.js project for a command-line todo app.
+
+Acceptance criteria:
+- A `package.json` exists with `"type": "module"` and a `"test"` script running `node --test`.
+- A `src/` directory exists as the source root.
+- Running `node --test` succeeds and exits with code 0, even with zero test files yet.
+
+# Todo Storage
+
+Implement an in-memory todo storage module at `src/storage.js`.
+
+Depends on: spec-project-setup
+
+Acceptance criteria:
+- Exports `createStore()`, returning `{ add(text), list(), complete(id) }` with per-instance state.
+- `add(text)` creates a todo with a unique numeric id, the given text, and `done: false`.
+- `list()` returns all todos in the order added. `complete(id)` marks one done (or returns
+  `undefined` for an unknown id).
+- At least 3 unit tests in `test/storage.test.js` using `node:test`/`node:assert`.
+
+# CLI Commands
+
+Implement a CLI at `src/cli.js` on top of the storage module. Each invocation is a separate
+process, so persist todos to a `todos.json` file between invocations.
+
+Depends on: spec-todo-storage
+
+Acceptance criteria:
+- `node src/cli.js add "buy milk"` prints `Added: <id> - buy milk` and persists it to `todos.json`.
+- `node src/cli.js list` prints one line per todo as `<id> [x] text` / `<id> [ ] text`.
+- `node src/cli.js complete <id>` marks it done, or prints an error and exits non-zero for an
+  unknown id.
+```
+
+```bash
+specos spec add spec.md      # normalize + validate → spec.lock.json
+specos plan                   # sanity-check the dependency-ordered task list
+specos run --yes --test-command "npm test"
+```
+
+`plan` prints:
+
+```
+3 task(s), execution order (dependencies first):
+
+  [high] spec-project-setup — Project Setup
+  [medium] spec-todo-storage — Todo Storage (depends on: spec-project-setup)
+  [medium] spec-cli-commands — CLI Commands (depends on: spec-todo-storage)
+```
+
+`run` works through the graph, and afterward:
+
+```bash
+node src/cli.js add "buy milk"     # Added: 1 - buy milk
+node src/cli.js list                # 1 [ ] buy milk
+node src/cli.js complete 1          # Completed: 1
+npm test                            # all green
+```
+
 ## Approval gates
 
 Three gates, each independently toggleable in `specos.config.json`:
@@ -223,6 +297,35 @@ spec.lock.json          # canonical ingested spec (commit this)
   transcripts/*.json      # full agent transcripts, for audit only — gitignored
   worktrees/              # transient — removed automatically after each task merges
 ```
+
+## Troubleshooting
+
+**`Cannot find module '.../src/src/cli/index.ts'`** — you ran `npx tsx src/cli/index.ts ...` from
+inside the `src/` directory instead of the repo root, so the path got doubled up. Either `cd ..`
+back to the repo root first, or (better) run `specos <command>` after `npm link` — see
+[Quick install](#quick-install) — so you don't need to think about paths at all.
+
+**`Invalid API key` / `Fix external API key`** — specOS's `claude` subprocess isn't picking up the
+right auth. If your `claude` CLI normally authenticates through a custom gateway (an `env` block
+in `~/.claude/settings.json`), that same `ANTHROPIC_BASE_URL` needs to be exported in the shell
+you're running `specos` from — some sandboxed/CI shells reset it to the public API default, which
+then fails against a gateway-issued key. `export ANTHROPIC_BASE_URL=<your gateway URL>` before
+running `specos` fixes it. `claude -p "hi"` in the same shell is a quick way to confirm auth works
+before blaming specOS.
+
+**"The dev server failed to start"** — specOS has no dev server; it's a CLI tool, not a web app.
+Nothing to preview in a browser. Run its commands directly in a terminal instead.
+
+**A section is marked ambiguous by `spec add`** — that's the validator agent doing its job, not
+an error. Read the printed questions, tighten the acceptance criteria in your spec, and re-run
+`specos spec add <file>`. It's safe to re-run — nodes merge into `spec.lock.json` by id, so tasks
+from other files are untouched — but every section in *this* file gets re-normalized and
+re-validated (a fresh model call each), not just the one you changed.
+
+**A task ends up `blocked`** — check `specos status` for which one, then `.specos/audit.jsonl`
+for the reviewer's feedback or the merge-conflict reason. Fix the spec/task if needed, then
+`specos retry <taskId>` to discard its worktree/branch and requeue it, followed by `specos run`
+again.
 
 ## Development (working on specOS itself)
 
