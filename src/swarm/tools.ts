@@ -41,9 +41,9 @@ function writeFileTool(worktreeRoot: string): ToolDefinition {
 function listDirTool(worktreeRoot: string): ToolDefinition {
   return {
     name: "list_dir",
-    description: "List entries in a directory relative to the worktree root.",
+    description: "List entries in a directory relative to the worktree root. Pass \".\" for the worktree root itself.",
     inputSchema: { path: "string" },
-    handler: async (input) => readdir(resolveScoped(worktreeRoot, String(input.path ?? "."))),
+    handler: async (input) => readdir(resolveScoped(worktreeRoot, String(input.path))),
   };
 }
 

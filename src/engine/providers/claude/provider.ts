@@ -1,4 +1,4 @@
-import { query, type Options, type PermissionMode, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { query, type Options, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import type {
   AgentHandle,
   AgentMessage,
@@ -10,15 +10,6 @@ import type {
 } from "../../core/types.js";
 import { AsyncQueue } from "./asyncQueue.js";
 import { buildMcpServer } from "./toolBridge.js";
-
-const ROLE_PERMISSION_MODE: Record<AgentRole, PermissionMode> = {
-  normalizer: "default",
-  validator: "default",
-  worker: "acceptEdits",
-  reviewer: "plan",
-  "conflict-resolver": "acceptEdits",
-  summarizer: "default",
-};
 
 function zeroUsage(): TokenUsage {
   return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
@@ -96,13 +87,17 @@ export class ClaudeAgentProvider implements AgentProvider {
     const queryOptions: Options = {
       cwd: options.cwd,
       systemPrompt: options.systemPrompt,
-      permissionMode: ROLE_PERMISSION_MODE[options.role],
       maxTurns: options.maxTurns,
       // Disable every native built-in tool (Read/Write/Edit/Bash/...) — agents get only the
       // worktree-sandboxed tools we hand them via `options.tools`, enforcing the harness's
-      // per-role file/path boundaries instead of relying on permissionMode alone.
+      // per-role file/path boundaries instead of relying on the SDK's permission system.
       tools: [],
       mcpServers: { [`specos-${options.role}`]: mcpServer },
+      // query() runs headless with no TTY to answer an interactive permission prompt, and our
+      // own tool sandboxing (per-role tool sets + resolveScoped path confinement) is already
+      // the real boundary enforcement here, so bypass the SDK's own permission system entirely.
+      permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
     };
 
     const session = query({ prompt: input, options: queryOptions }) as AsyncGenerator<any, void>;

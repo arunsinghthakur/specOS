@@ -6,10 +6,13 @@
 
 export type AgentRole = "normalizer" | "validator" | "worker" | "reviewer" | "conflict-resolver" | "summarizer";
 
+export type ToolFieldType = "string" | "number" | "boolean";
+
 export interface ToolDefinition {
   name: string;
   description: string;
-  inputSchema: Record<string, unknown>;
+  /** Minimal, provider-agnostic field-type map — each provider adapter converts this into its own schema format. */
+  inputSchema: Record<string, ToolFieldType>;
   handler: (input: Record<string, unknown>) => Promise<unknown>;
 }
 
