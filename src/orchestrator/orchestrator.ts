@@ -11,10 +11,19 @@ import type { SpecNode } from "../spec/schema.js";
 import { loadProjectMemory } from "../memory/projectMemory.js";
 import { SwarmMemory } from "../memory/swarmMemory.js";
 import { buildWorkerSystemPrompt, extractDoneSummary } from "../memory/taskMemory.js";
-import { createWorktree, commitAll, removeWorktree } from "../integrations/git/worktree.js";
+import {
+  abortMerge,
+  commitMerge,
+  createWorktree,
+  commitAll,
+  dryRunMerge,
+  mergeBranch,
+  removeWorktree,
+} from "../integrations/git/worktree.js";
 import { runWorker } from "../swarm/worker.js";
 import { runReviewer } from "../swarm/reviewer.js";
-import { mergeTask } from "../swarm/mergeCoordinator.js";
+import { resolveConflict } from "../swarm/conflictResolver.js";
+import { Mutex } from "../swarm/mutex.js";
 
 const WORKER_TIMEOUT_MS = 10 * 60 * 1000;
 const REVIEW_TIMEOUT_MS = 5 * 60 * 1000;
@@ -29,10 +38,12 @@ export interface OrchestratorDeps {
   testCommand?: string;
 }
 
+type TaskOutcome = "merged" | "blocked" | "failed";
+
 /**
- * Single-worker orchestration loop: processes ready tasks one at a time in their own
- * worktree (no concurrency yet — that's Phase 4). Validates the harness state machine,
- * approval gates, and memory tiers end-to-end before adding parallel workers.
+ * Runs up to `config.concurrency` worker agents in parallel, each in its own git worktree.
+ * Merges are still serialized through a mutex, since dry-run/real merges all operate on the
+ * single shared integration-branch checkout at repoRoot.
  */
 export async function runOrchestrator(deps: OrchestratorDeps): Promise<void> {
   const nodes = await readSpecLock(deps.repoRoot);
@@ -44,6 +55,7 @@ export async function runOrchestrator(deps: OrchestratorDeps): Promise<void> {
   const swarmMemory = new SwarmMemory(deps.repoRoot);
   const audit = new AuditLog(deps.repoRoot);
   const breaker = new CircuitBreaker(0.5, 3);
+  const mergeMutex = new Mutex();
 
   const completed = new Set(
     deps.stateStore
@@ -51,29 +63,47 @@ export async function runOrchestrator(deps: OrchestratorDeps): Promise<void> {
       .filter((t) => t.status === "merged")
       .map((t) => t.id),
   );
+  const settled = new Set(
+    deps.stateStore
+      .listTasks()
+      .filter((t) => t.status === "failed" || t.status === "blocked")
+      .map((t) => t.id),
+  );
+
+  const inFlight = new Map<string, Promise<{ id: string; outcome: TaskOutcome }>>();
 
   for (;;) {
-    const ready = graph.getReady(completed).filter((node) => deps.stateStore.getTask(node.id)?.status !== "failed");
-    if (ready.length === 0) break;
+    const ready = graph.getReady(completed).filter((node) => !inFlight.has(node.id) && !settled.has(node.id));
+    for (const node of ready) {
+      if (inFlight.size >= deps.config.concurrency) break;
+      inFlight.set(
+        node.id,
+        processTask(node, deps, projectMemory, swarmMemory, audit, mergeMutex).then((outcome) => ({
+          id: node.id,
+          outcome,
+        })),
+      );
+    }
 
-    const node = ready[0];
-    const outcome = await processTask(node, deps, projectMemory, swarmMemory, audit);
+    if (inFlight.size === 0) break;
+
+    const { id, outcome } = await Promise.race(inFlight.values());
+    inFlight.delete(id);
     breaker.record(outcome === "merged");
 
     if (outcome === "merged") {
-      completed.add(node.id);
+      completed.add(id);
     } else {
-      console.log(`Task ${node.id} ended in state "${outcome}" — stopping run for review.`);
-      break;
+      settled.add(id);
+      console.log(`Task ${id} ended in state "${outcome}".`);
     }
 
     if (breaker.isTripped()) {
+      await Promise.allSettled(inFlight.values());
       throw new Error("Circuit breaker tripped: too many task failures in this run.");
     }
   }
 }
-
-type TaskOutcome = "merged" | "blocked" | "failed";
 
 async function processTask(
   node: SpecNode,
@@ -81,6 +111,7 @@ async function processTask(
   projectMemory: string,
   swarmMemory: SwarmMemory,
   audit: AuditLog,
+  mergeMutex: Mutex,
 ): Promise<TaskOutcome> {
   const { stateStore, repoRoot, config } = deps;
   stateStore.upsertTask(node.id, "pending");
@@ -125,27 +156,17 @@ async function processTask(
       return "blocked";
     }
 
-    const approved = await deps.approvalGate.request({
-      gate: "merge",
-      summary: `Merge ${worktree.branch} into ${config.integrationBranch} for task "${node.title}"?\nReviewer feedback: ${review.feedback}`,
-    });
-    if (!approved) {
+    const mergeSummary = await mergeMutex.runExclusive(() => mergeIntoIntegration(node, worktree, deps, review.feedback));
+    if (!mergeSummary.merged) {
       assertTransition("review", "blocked");
       stateStore.upsertTask(node.id, "blocked");
-      return "blocked";
-    }
-
-    const mergeOutcome = await mergeTask(repoRoot, worktree, config.integrationBranch);
-    if (!mergeOutcome.merged) {
-      assertTransition("review", "blocked");
-      stateStore.upsertTask(node.id, "blocked");
-      console.warn(`Merge blocked for ${node.id}: ${mergeOutcome.reason}`);
+      console.warn(`Merge blocked for ${node.id}: ${mergeSummary.reason}`);
       return "blocked";
     }
 
     assertTransition("review", "merged");
     stateStore.upsertTask(node.id, "merged");
-    await audit.record(node.id, "merged");
+    await audit.record(node.id, "merged", { conflictResolved: mergeSummary.conflictResolved });
     await swarmMemory.append({
       taskId: node.id,
       summary: extractDoneSummary(workerResult.finalMessage),
@@ -158,4 +179,49 @@ async function processTask(
     await audit.record(node.id, "failed", { error: err instanceof EscalationError ? err.message : String(err) });
     return "failed";
   }
+}
+
+interface MergeAttemptOutcome {
+  merged: boolean;
+  reason?: string;
+  conflictResolved: boolean;
+}
+
+/** Runs entirely under the merge mutex: dry-run check, then either a clean merge or conflict resolution, each gated by approval. */
+async function mergeIntoIntegration(
+  node: SpecNode,
+  worktree: { path: string; branch: string },
+  deps: OrchestratorDeps,
+  reviewFeedback: string,
+): Promise<MergeAttemptOutcome> {
+  const { repoRoot, config, approvalGate, provider } = deps;
+  const clean = await dryRunMerge(repoRoot, worktree.branch, config.integrationBranch);
+
+  if (clean) {
+    const approved = await approvalGate.request({
+      gate: "merge",
+      summary: `Merge ${worktree.branch} into ${config.integrationBranch} for task "${node.title}"?\nReviewer feedback: ${reviewFeedback}`,
+    });
+    if (!approved) return { merged: false, reason: "merge not approved", conflictResolved: false };
+
+    await mergeBranch(repoRoot, worktree.branch, config.integrationBranch);
+    return { merged: true, conflictResolved: false };
+  }
+
+  const resolution = await resolveConflict(provider, node, repoRoot, worktree.branch, config.integrationBranch);
+  if (!resolution.resolved) {
+    return { merged: false, reason: `conflict could not be auto-resolved: ${resolution.summary}`, conflictResolved: false };
+  }
+
+  const approved = await approvalGate.request({
+    gate: "merge",
+    summary: `Merge conflict for task "${node.title}" was auto-resolved: ${resolution.summary}\nCommit this merge into ${config.integrationBranch}?`,
+  });
+  if (!approved) {
+    await abortMerge(repoRoot);
+    return { merged: false, reason: "conflict resolution not approved", conflictResolved: false };
+  }
+
+  await commitMerge(repoRoot, `Merge ${worktree.branch} into ${config.integrationBranch} (conflict-resolved)`);
+  return { merged: true, conflictResolved: true };
 }

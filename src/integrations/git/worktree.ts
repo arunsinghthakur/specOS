@@ -42,12 +42,11 @@ export async function commitAll(worktreePath: string, message: string): Promise<
 /** Attempts a merge without committing, then aborts — used to detect conflicts before touching the integration branch. */
 export async function dryRunMerge(repoRoot: string, branch: string, integrationBranch: string): Promise<boolean> {
   try {
-    await git(repoRoot, ["checkout", integrationBranch]);
-    await git(repoRoot, ["merge", "--no-commit", "--no-ff", branch]);
-    await git(repoRoot, ["merge", "--abort"]);
+    await attemptRealMerge(repoRoot, branch, integrationBranch);
+    await abortMerge(repoRoot);
     return true;
   } catch {
-    await git(repoRoot, ["merge", "--abort"]).catch(() => undefined);
+    await abortMerge(repoRoot);
     return false;
   }
 }
@@ -64,4 +63,28 @@ export async function currentBranchExists(repoRoot: string, branch: string): Pro
   } catch {
     return false;
   }
+}
+
+/**
+ * Real (non-dry-run) merge attempt against the integration branch checkout at `repoRoot`.
+ * Leaves conflict markers in the working tree without committing when there's a conflict —
+ * used by the conflict-resolution agent, which then edits the conflicted files directly.
+ * Resolves normally when the merge succeeds cleanly.
+ */
+export async function attemptRealMerge(repoRoot: string, branch: string, integrationBranch: string): Promise<void> {
+  await git(repoRoot, ["checkout", integrationBranch]);
+  await git(repoRoot, ["merge", "--no-commit", "--no-ff", branch]);
+}
+
+export async function abortMerge(repoRoot: string): Promise<void> {
+  await git(repoRoot, ["merge", "--abort"]).catch(() => undefined);
+}
+
+export async function listUnmergedPaths(repoRoot: string): Promise<string[]> {
+  const out = await git(repoRoot, ["diff", "--name-only", "--diff-filter=U"]);
+  return out.split("\n").filter((line) => line.length > 0);
+}
+
+export async function commitMerge(repoRoot: string, message: string): Promise<void> {
+  await git(repoRoot, ["commit", "-m", message]);
 }
