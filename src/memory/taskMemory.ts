@@ -31,7 +31,13 @@ export function buildWorkerSystemPrompt(
   return sections.filter((section) => section.length > 0).join("\n\n");
 }
 
+const DONE_MARKER_RE = /DONE:\s*(.*)/is;
+
+export function hasDoneMarker(finalMessage: string): boolean {
+  return DONE_MARKER_RE.test(finalMessage);
+}
+
 export function extractDoneSummary(finalMessage: string): string {
-  const match = /DONE:\s*(.*)/is.exec(finalMessage);
+  const match = DONE_MARKER_RE.exec(finalMessage);
   return match ? match[1].trim() : finalMessage.slice(0, 200).trim();
 }

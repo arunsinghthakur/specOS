@@ -10,7 +10,9 @@ import { TaskGraph } from "../spec/taskGraph.js";
 import type { SpecNode } from "../spec/schema.js";
 import { loadProjectMemory } from "../memory/projectMemory.js";
 import { SwarmMemory } from "../memory/swarmMemory.js";
-import { buildWorkerSystemPrompt, extractDoneSummary } from "../memory/taskMemory.js";
+import { buildWorkerSystemPrompt } from "../memory/taskMemory.js";
+import { compactWorkerResult } from "../memory/compaction.js";
+import { archiveTranscript } from "../memory/transcriptArchive.js";
 import {
   abortMerge,
   commitMerge,
@@ -39,6 +41,14 @@ export interface OrchestratorDeps {
 }
 
 type TaskOutcome = "merged" | "blocked" | "failed";
+
+/** `budget.maxUsd` isn't enforced yet — we don't have a live per-model pricing table to convert it against. */
+function isBudgetExceeded(deps: OrchestratorDeps): boolean {
+  const maxTokens = deps.config.budget.maxTokens;
+  if (!maxTokens) return false;
+  const usage = deps.stateStore.totalUsage();
+  return usage.inputTokens + usage.outputTokens >= maxTokens;
+}
 
 /**
  * Runs up to `config.concurrency` worker agents in parallel, each in its own git worktree.
@@ -73,7 +83,14 @@ export async function runOrchestrator(deps: OrchestratorDeps): Promise<void> {
   const inFlight = new Map<string, Promise<{ id: string; outcome: TaskOutcome }>>();
 
   for (;;) {
-    const ready = graph.getReady(completed).filter((node) => !inFlight.has(node.id) && !settled.has(node.id));
+    if (inFlight.size === 0 && isBudgetExceeded(deps)) {
+      console.log("Token budget exceeded — stopping run before starting further tasks.");
+      break;
+    }
+
+    const ready = isBudgetExceeded(deps)
+      ? []
+      : graph.getReady(completed).filter((node) => !inFlight.has(node.id) && !settled.has(node.id));
     for (const node of ready) {
       if (inFlight.size >= deps.config.concurrency) break;
       inFlight.set(
@@ -137,10 +154,12 @@ async function processTask(
     );
     stateStore.recordUsage(node.id, workerResult.usage);
     await commitAll(worktree.path, `specos: ${node.title}`);
+    await archiveTranscript(repoRoot, node.id, workerResult.transcript);
+    const summary = await compactWorkerResult(deps.provider, node, workerResult);
 
     assertTransition("in_progress", "review");
     stateStore.upsertTask(node.id, "review");
-    await audit.record(node.id, "review", { summary: extractDoneSummary(workerResult.finalMessage) });
+    await audit.record(node.id, "review", { summary });
 
     const review = await withTimeout(
       runReviewer(deps.provider, node, worktree.path, deps.testCommand),
@@ -169,7 +188,7 @@ async function processTask(
     await audit.record(node.id, "merged", { conflictResolved: mergeSummary.conflictResolved });
     await swarmMemory.append({
       taskId: node.id,
-      summary: extractDoneSummary(workerResult.finalMessage),
+      summary,
       timestamp: new Date().toISOString(),
     });
     await removeWorktree(repoRoot, worktree).catch(() => undefined);

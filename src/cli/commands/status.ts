@@ -1,5 +1,6 @@
 import type { Command } from "commander";
 import { StateStore } from "../../storage/stateStore.js";
+import { loadConfig } from "../../config/load.js";
 
 export function registerStatusCommand(program: Command): void {
   program
@@ -18,9 +19,15 @@ export function registerStatusCommand(program: Command): void {
       }
       if (opts.usage) {
         const usage = store.totalUsage();
+        const total = usage.inputTokens + usage.outputTokens;
         console.log(
           `\nUsage: input=${usage.inputTokens} output=${usage.outputTokens} cacheRead=${usage.cacheReadTokens} cacheWrite=${usage.cacheWriteTokens}`,
         );
+        const config = await loadConfig();
+        if (config.budget.maxTokens) {
+          const pct = ((total / config.budget.maxTokens) * 100).toFixed(1);
+          console.log(`Budget: ${total} / ${config.budget.maxTokens} tokens (${pct}%)`);
+        }
       }
       store.close();
     });
