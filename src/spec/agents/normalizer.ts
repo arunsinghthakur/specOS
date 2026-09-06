@@ -10,10 +10,11 @@ const SYSTEM_PROMPT = `You convert a raw feature/ticket description into a stric
   "acceptanceCriteria": string[],
   "dependencies": string[],   // ids/keys of other tickets this depends on, if mentioned
   "priority": "low" | "medium" | "high" | "critical",
-  "epic": string | undefined,
+  "epic": string,             // omit this field entirely if there is no epic — never write the literal "undefined"
   "nonFunctionalReqs": string[]
 }
-Respond with ONLY the JSON object, no prose, no markdown fences.`;
+Respond with ONLY valid JSON (no prose, no markdown fences). Every value must be valid JSON — never use the
+bare word undefined; omit a key instead of setting it to undefined.`;
 
 /** Runs the raw spec text through a normalizer agent and validates the result against NormalizedSpecSchema. */
 export async function normalizeSpec(provider: AgentProvider, input: RawSpecInput): Promise<SpecNode> {

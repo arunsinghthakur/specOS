@@ -5,5 +5,13 @@ export function extractJson(text: string): unknown {
   if (start === -1 || end === -1 || end < start) {
     throw new Error(`Agent did not return JSON: ${text.slice(0, 200)}`);
   }
-  return JSON.parse(text.slice(start, end + 1));
+  const candidate = text.slice(start, end + 1);
+  try {
+    return JSON.parse(candidate);
+  } catch {
+    // Models occasionally emit a bare `undefined` for an optional field despite instructions
+    // not to — drop that key/value pair entirely (equivalent to omitting the field) rather
+    // than failing the whole response over one stray token.
+    return JSON.parse(candidate.replace(/,\s*"[^"]+"\s*:\s*undefined/g, ""));
+  }
 }
