@@ -98,6 +98,10 @@ export class ClaudeAgentProvider implements AgentProvider {
       systemPrompt: options.systemPrompt,
       permissionMode: ROLE_PERMISSION_MODE[options.role],
       maxTurns: options.maxTurns,
+      // Disable every native built-in tool (Read/Write/Edit/Bash/...) — agents get only the
+      // worktree-sandboxed tools we hand them via `options.tools`, enforcing the harness's
+      // per-role file/path boundaries instead of relying on permissionMode alone.
+      tools: [],
       mcpServers: { [`specos-${options.role}`]: mcpServer },
     };
 

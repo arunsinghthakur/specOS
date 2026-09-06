@@ -1,13 +1,33 @@
 import type { Command } from "commander";
+import { loadConfig } from "../../config/load.js";
+import { createProvider } from "../../engine/core/registry.js";
+import { StateStore } from "../../storage/stateStore.js";
+import { CliApprovalGateHandler } from "../../harness/approvalGate.js";
+import { runOrchestrator } from "../../orchestrator/orchestrator.js";
 
 export function registerRunCommand(program: Command): void {
   program
     .command("run")
     .description("Execute the orchestrator end-to-end with approval gates")
-    .option("--concurrency <n>", "override configured worker concurrency")
-    .option("--yes", "skip confirmation prompts (approval gates forced in config still apply)", false)
-    .action(async () => {
-      console.log("`specos run` is not implemented yet (Phase 3 — single-agent execution, then Phase 4 — swarm).");
-      console.log("See the build order in the project plan.");
+    .option("--test-command <cmd>", "command the reviewer agent runs to verify each task, e.g. \"npm test\"")
+    .option("--yes", "skip confirmation prompts for gates not forced manual in config", false)
+    .action(async (opts: { testCommand?: string; yes: boolean }) => {
+      const config = await loadConfig();
+      const provider = createProvider(config);
+      const stateStore = new StateStore(process.cwd());
+      const approvalGate = new CliApprovalGateHandler(config, opts.yes);
+
+      try {
+        await runOrchestrator({
+          provider,
+          config,
+          stateStore,
+          repoRoot: process.cwd(),
+          approvalGate,
+          testCommand: opts.testCommand,
+        });
+      } finally {
+        stateStore.close();
+      }
     });
 }

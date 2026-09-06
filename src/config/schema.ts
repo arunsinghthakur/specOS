@@ -12,6 +12,8 @@ export const ConfigSchema = z.object({
     })
     .default({}),
   approvalGates: z.array(ApprovalGateSchema).default(["merge", "destructive_git", "final_integration"]),
+  /** Gates that must always prompt, even when `specos run --yes` is passed. */
+  forceManualGates: z.array(ApprovalGateSchema).default([]),
   integrationBranch: z.string().default("main"),
   jira: z
     .object({
