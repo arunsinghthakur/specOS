@@ -14,16 +14,14 @@ spec.md / Jira  →  spec.lock.json  →  task graph  →  worker agents (git wo
 ## Quick install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<org>/specOS/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/arunsinghthakur/specOS/main/install.sh | bash
 ```
 
 One command: clones (or updates) the repo, `npm install`, `npm run build`, and `npm link`s the
-`specos` command onto your PATH. Requires Node.js ≥ 20 and git. Update `<org>` once this repo is
-pushed to its real remote (`git remote add origin <url>` and push) — until then, run the same
-script locally instead:
+`specos` command onto your PATH. Requires Node.js ≥ 20 and git. Equivalently, from a local clone:
 
 ```bash
-git clone <this-repo-url> specOS && cd specOS && bash install.sh
+git clone https://github.com/arunsinghthakur/specOS.git && cd specOS && bash install.sh
 ```
 
 Both forms are the same script (`install.sh` at the repo root) — the remote one just fetches it

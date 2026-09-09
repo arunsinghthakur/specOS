@@ -2,7 +2,7 @@
 # specOS installer.
 #
 # Remote (once pushed to a git host):
-#   curl -fsSL https://raw.githubusercontent.com/<org>/specOS/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/arunsinghthakur/specOS/main/install.sh | bash
 #
 # Local (from an already-cloned checkout):
 #   bash install.sh
@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-REPO_URL="${SPECOS_REPO_URL:-https://github.com/YOUR_ORG/specOS.git}"
+REPO_URL="${SPECOS_REPO_URL:-https://github.com/arunsinghthakur/specOS.git}"
 INSTALL_DIR="${SPECOS_INSTALL_DIR:-$HOME/specos}"
 
 log() { printf '==> %s\n' "$1"; }
