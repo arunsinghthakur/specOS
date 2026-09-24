@@ -5,11 +5,12 @@ import { StateStore } from "../storage/stateStore.js";
 import { AuditLog } from "../harness/auditLog.js";
 import { CircuitBreaker, EscalationError, retryWithBackoff, withTimeout } from "../harness/guardrails.js";
 import { assertTransition } from "../harness/stateMachine.js";
-import { readSpecLock } from "../spec/lock.js";
+import { readSpecNodes } from "../spec/specFiles.js";
 import { TaskGraph } from "../spec/taskGraph.js";
 import type { SpecNode } from "../spec/schema.js";
 import { loadProjectMemory } from "../memory/projectMemory.js";
 import { SwarmMemory } from "../memory/swarmMemory.js";
+import { FeedbackMemory } from "../memory/feedbackMemory.js";
 import { buildWorkerSystemPrompt } from "../memory/taskMemory.js";
 import { compactWorkerResult } from "../memory/compaction.js";
 import { archiveTranscript } from "../memory/transcriptArchive.js";
@@ -56,13 +57,14 @@ function isBudgetExceeded(deps: OrchestratorDeps): boolean {
  * single shared integration-branch checkout at repoRoot.
  */
 export async function runOrchestrator(deps: OrchestratorDeps): Promise<void> {
-  const nodes = await readSpecLock(deps.repoRoot);
+  const nodes = await readSpecNodes(deps.repoRoot);
   if (nodes.length === 0) {
-    throw new Error("No tasks in spec.lock.json — run `specos spec add <file>` first.");
+    throw new Error("No tasks in specs/ — run `specos spec add <file>` first.");
   }
   const graph = new TaskGraph(nodes);
   const projectMemory = await loadProjectMemory(deps.repoRoot);
   const swarmMemory = new SwarmMemory(deps.repoRoot);
+  const feedbackMemory = new FeedbackMemory(deps.repoRoot);
   const audit = new AuditLog(deps.repoRoot);
   const breaker = new CircuitBreaker(0.5, 3);
   const mergeMutex = new Mutex();
@@ -95,7 +97,7 @@ export async function runOrchestrator(deps: OrchestratorDeps): Promise<void> {
       if (inFlight.size >= deps.config.concurrency) break;
       inFlight.set(
         node.id,
-        processTask(node, deps, projectMemory, swarmMemory, audit, mergeMutex).then((outcome) => ({
+        processTask(node, deps, projectMemory, swarmMemory, feedbackMemory, audit, mergeMutex).then((outcome) => ({
           id: node.id,
           outcome,
         })),
@@ -127,6 +129,7 @@ async function processTask(
   deps: OrchestratorDeps,
   projectMemory: string,
   swarmMemory: SwarmMemory,
+  feedbackMemory: FeedbackMemory,
   audit: AuditLog,
   mergeMutex: Mutex,
 ): Promise<TaskOutcome> {
@@ -145,7 +148,8 @@ async function processTask(
     await audit.record(node.id, "in_progress");
 
     const completedSummaries = await swarmMemory.all();
-    const systemPrompt = buildWorkerSystemPrompt(node, projectMemory, completedSummaries);
+    const priorFeedback = await feedbackMemory.forTask(node.id);
+    const systemPrompt = buildWorkerSystemPrompt(node, projectMemory, completedSummaries, priorFeedback);
 
     const workerResult = await retryWithBackoff(
       () => withTimeout(runWorker(deps.provider, node, worktree.path, systemPrompt), WORKER_TIMEOUT_MS, `worker:${node.id}`),
@@ -171,6 +175,7 @@ async function processTask(
     if (!review.approved) {
       assertTransition("review", "blocked");
       stateStore.upsertTask(node.id, "blocked");
+      await feedbackMemory.append({ taskId: node.id, feedback: review.feedback, timestamp: new Date().toISOString() });
       console.warn(`Reviewer rejected ${node.id}: ${review.feedback}`);
       return "blocked";
     }
@@ -179,6 +184,9 @@ async function processTask(
     if (!mergeSummary.merged) {
       assertTransition("review", "blocked");
       stateStore.upsertTask(node.id, "blocked");
+      if (mergeSummary.reason) {
+        await feedbackMemory.append({ taskId: node.id, feedback: mergeSummary.reason, timestamp: new Date().toISOString() });
+      }
       console.warn(`Merge blocked for ${node.id}: ${mergeSummary.reason}`);
       return "blocked";
     }

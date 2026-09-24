@@ -5,6 +5,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import {
+  commitPaths,
   createWorktree,
   currentBranchExists,
   deleteBranch,
@@ -44,6 +45,44 @@ describe("currentBranchExists / deleteBranch", () => {
     try {
       await initRepo(repo);
       expect(await currentBranchExists(repo, "specos/never-existed")).toBe(false);
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("commitPaths", () => {
+  it("stages and commits only the given paths, leaving other unstaged changes untouched", async () => {
+    const repo = await mkdtemp(path.join(tmpdir(), "specos-commit-"));
+    try {
+      await initRepo(repo);
+      await writeFile(path.join(repo, "specs-a.txt"), "a\n", "utf-8");
+      await writeFile(path.join(repo, "unrelated.txt"), "should stay unstaged\n", "utf-8");
+
+      const committed = await commitPaths(repo, ["specs-a.txt"], "specos: spec — add a");
+      expect(committed).toBe(true);
+
+      const { stdout: log } = await execFileAsync("git", ["log", "-1", "--format=%s"], { cwd: repo });
+      expect(log.trim()).toBe("specos: spec — add a");
+
+      const { stdout: status } = await execFileAsync("git", ["status", "--porcelain"], { cwd: repo });
+      expect(status).toContain("?? unrelated.txt");
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("returns false and commits nothing when the given paths have no changes", async () => {
+    const repo = await mkdtemp(path.join(tmpdir(), "specos-commit-"));
+    try {
+      await initRepo(repo);
+      const before = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: repo });
+
+      const committed = await commitPaths(repo, ["README.md"], "no-op");
+
+      expect(committed).toBe(false);
+      const after = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: repo });
+      expect(after.stdout).toBe(before.stdout);
     } finally {
       await rm(repo, { recursive: true, force: true });
     }

@@ -8,7 +8,7 @@ import { ConfigSchema } from "../src/config/schema.js";
 import { StateStore } from "../src/storage/stateStore.js";
 import { AutoApproveGateHandler } from "../src/harness/approvalGate.js";
 import { runOrchestrator } from "../src/orchestrator/orchestrator.js";
-import { writeSpecLock } from "../src/spec/lock.js";
+import { writeSpecNodes } from "../src/spec/specFiles.js";
 import type { AgentHandle, AgentProvider, CreateAgentOptions, TokenUsage } from "../src/engine/core/types.js";
 import type { SpecNode } from "../src/spec/schema.js";
 
@@ -69,7 +69,7 @@ describe("runOrchestrator token budget", () => {
     const repo = await mkdtemp(path.join(tmpdir(), "specos-budget-"));
     try {
       await initRepo(repo);
-      await writeSpecLock(
+      await writeSpecNodes(
         [node("feature-a", "Feature A"), node("feature-b", "Feature B"), node("feature-c", "Feature C")],
         repo,
       );

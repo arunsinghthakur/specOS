@@ -1,15 +1,15 @@
 import type { Command } from "commander";
-import { readSpecLock } from "../../spec/lock.js";
+import { readSpecNodes } from "../../spec/specFiles.js";
 import { TaskGraph } from "../../spec/taskGraph.js";
 
 export function registerPlanCommand(program: Command): void {
   program
     .command("plan")
-    .description("Build and inspect the task graph from spec.lock.json (dry run, writes no code)")
+    .description("Build and inspect the task graph from specs/ (dry run, writes no code)")
     .action(async () => {
-      const nodes = await readSpecLock();
+      const nodes = await readSpecNodes();
       if (nodes.length === 0) {
-        console.log("spec.lock.json has no tasks yet. Run `specos spec add <file>` first.");
+        console.log("specs/ has no tasks yet. Run `specos spec add <file>` first.");
         return;
       }
 

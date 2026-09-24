@@ -4,7 +4,7 @@ import { StateStore } from "../storage/stateStore.js";
 import { CliApprovalGateHandler } from "../harness/approvalGate.js";
 import { runOrchestrator } from "../orchestrator/orchestrator.js";
 import { pushBranch } from "../integrations/git/worktree.js";
-import { readSpecLock } from "../spec/lock.js";
+import { readSpecNodes } from "../spec/specFiles.js";
 import { TaskGraph } from "../spec/taskGraph.js";
 
 export interface RunActionOptions {
@@ -16,8 +16,8 @@ export interface RunActionOptions {
 /**
  * Shared by `specos run` and `specos resume`: the orchestrator is already resumable by
  * design — it reads persisted task status from the state store and ingested tasks from
- * spec.lock.json on every invocation, so re-running after an interruption picks up where
- * it left off with no separate code path needed.
+ * specs/ on every invocation, so re-running after an interruption picks up where it left
+ * off with no separate code path needed.
  */
 export async function executeRun(opts: RunActionOptions): Promise<void> {
   const repoRoot = process.cwd();
@@ -37,7 +37,7 @@ export async function executeRun(opts: RunActionOptions): Promise<void> {
     });
 
     if (opts.push) {
-      const nodes = await readSpecLock(repoRoot);
+      const nodes = await readSpecNodes(repoRoot);
       const graph = new TaskGraph(nodes);
       const merged = stateStore.listTasks().filter((t) => t.status === "merged").length;
       if (merged < graph.size) {

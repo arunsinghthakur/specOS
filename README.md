@@ -6,10 +6,16 @@ coordinated by an orchestrator, kept within guardrails by a harness, and kept to
 via tiered memory management.
 
 ```
-spec.md / Jira  →  spec.lock.json  →  task graph  →  worker agents (git worktrees)
+spec.md / Jira  →  specs/<id>.md  →  task graph  →  worker agents (git worktrees)
                                                             ↓
                                     reviewer agent  →  approval gate  →  merge
 ```
+
+**Scope:** specOS is built for one operator driving one run against one local clone at a
+time. `.specos/` (task state, memory, transcripts, worktrees) is gitignored and never synced —
+only `specs/*.md`, `specos.config.json`, and whatever code you explicitly `--push` are shared with
+anyone else. Running it from two clones against the same spec, or expecting a teammate's
+`git pull` to pick up what's already done, isn't supported yet.
 
 ## Quick install
 
@@ -33,10 +39,12 @@ not run a script from the internet.
 1. **SDD (spec-driven development)** — `specos spec add` parses a Markdown/text file (or pulls
    Jira issues via JQL) and runs each section through a **normalizer agent** (raw text → a
    structured `{title, description, acceptanceCriteria, dependencies, priority, ...}` node) and a
-   **validator agent** (flags ambiguity/missing info as clarifying questions before you plan).
-   The result is a versioned `spec.lock.json` — the single source of truth for every later step.
-2. **Task graph** — `specos plan` builds a dependency graph from `spec.lock.json` and shows the
-   execution order. Tasks with no unmet dependencies are "ready" to run.
+   **validator agent** (flags ambiguity/missing info as clarifying questions before you plan). The
+   result is one human-readable Markdown file per requirement — `specs/<id>.md` — the single
+   source of truth for every later step, auto-committed to your repo so each requirement gets its
+   own real git history (`git log`/`git blame` on the file, not a JSON diff).
+2. **Task graph** — `specos plan` reads every `specs/*.md` file, builds a dependency graph, and
+   shows the execution order. Tasks with no unmet dependencies are "ready" to run.
 3. **Agent swarm** — `specos run` runs up to `concurrency` ready tasks in parallel. Each task gets
    its own git worktree and branch; a **worker agent** implements it there, sandboxed to
    read/write/list/exec tools scoped to that worktree only (no access to your shell, home
@@ -54,9 +62,12 @@ not run a script from the internet.
 6. **Memory / token optimization** — each worker only ever sees its own task, not the whole spec
    or codebase. Completed tasks are compacted into one-line summaries (reusing the worker's own
    sign-off message when possible — no extra model call) and shared via a lightweight swarm
-   memory file, so later tasks know what already exists without re-reading full transcripts. Full
-   transcripts are archived to disk for audit, never re-loaded into context. `specos status
-   --usage` shows cumulative token usage against an optional budget.
+   memory file, so later tasks know what already exists without re-reading full transcripts. When
+   a reviewer rejects a task (or a merge is blocked), that feedback is persisted too, keyed by task
+   id — so if you `specos retry` the task, the worker's next attempt is told why the previous one
+   was rejected instead of starting cold. Full transcripts are archived to disk for audit, never
+   re-loaded into context. `specos status --usage` shows cumulative token usage against an
+   optional budget.
 
 ## Setup
 
@@ -122,10 +133,17 @@ build and grade against exactly what you write here.
 specos spec add spec.md
 ```
 
-Runs the normalizer + validator agents over every section and writes/merges into
-`spec.lock.json`. If the validator flags a section as ambiguous, it prints clarifying questions —
-worth fixing your spec and re-running `spec add` before planning, since the worker agent will
-otherwise have to guess.
+Runs the normalizer + validator agents over every section and writes one `specs/<id>.md` file per
+task — only the files that actually changed are touched and committed; re-running on unchanged
+requirements is a no-op. If the validator flags a section as ambiguous, it prints clarifying
+questions — worth fixing your spec and re-running `spec add` before planning, since the worker
+agent will otherwise have to guess.
+
+Each `specs/<id>.md` is meant to be read and hand-edited like any other file in the repo — a small
+frontmatter block holds the structured fields (`id`, `priority`, `dependencies`, `source`), and
+the body is plain Markdown (title, description, acceptance criteria, non-functional requirements).
+Edit one directly and it takes effect next time you read it — `specos spec add` doesn't need to
+run again unless you're ingesting new raw input.
 
 For Jira instead of a file:
 
@@ -220,7 +238,7 @@ Acceptance criteria:
 ```
 
 ```bash
-specos spec add spec.md      # normalize + validate → spec.lock.json
+specos spec add spec.md      # normalize + validate → specs/<id>.md, auto-committed
 specos plan                   # sanity-check the dependency-ordered task list
 specos run --yes --test-command "npm test"
 ```
@@ -284,7 +302,7 @@ Three gates, each independently toggleable in `specos.config.json`:
 
 ```
 specos.config.json     # config (commit this)
-spec.lock.json          # canonical ingested spec (commit this)
+specs/<id>.md           # one requirement per file, human-readable — auto-committed by `spec add`
 .specos/
   state.db              # SQLite run state (task status, token usage) — gitignored
   audit.jsonl            # every state transition + reviewer verdict — gitignored
@@ -292,6 +310,8 @@ spec.lock.json          # canonical ingested spec (commit this)
     project.md            # optional: hand-written conventions, auto-loaded into every agent's
                            # system prompt if present — commit this if you create it
     swarm.jsonl            # one-line summaries of completed tasks — gitignored
+    feedback.jsonl         # reviewer/merge rejection feedback, replayed into a task's next
+                           # retry attempt — gitignored
   transcripts/*.json      # full agent transcripts, for audit only — gitignored
   worktrees/              # transient — removed automatically after each task merges
 ```
@@ -316,9 +336,10 @@ Nothing to preview in a browser. Run its commands directly in a terminal instead
 
 **A section is marked ambiguous by `spec add`** — that's the validator agent doing its job, not
 an error. Read the printed questions, tighten the acceptance criteria in your spec, and re-run
-`specos spec add <file>`. It's safe to re-run — nodes merge into `spec.lock.json` by id, so tasks
-from other files are untouched — but every section in *this* file gets re-normalized and
-re-validated (a fresh model call each), not just the one you changed.
+`specos spec add <file>`. It's safe to re-run — each task writes its own `specs/<id>.md`, so tasks
+from other files are untouched, and a file whose re-normalized content is unchanged isn't
+rewritten or recommitted — but every section in *this* file gets re-normalized and re-validated
+(a fresh model call each), not just the one you changed.
 
 **A task ends up `blocked`** — check `specos status` for which one, then `.specos/audit.jsonl`
 for the reviewer's feedback or the merge-conflict reason. Fix the spec/task if needed, then

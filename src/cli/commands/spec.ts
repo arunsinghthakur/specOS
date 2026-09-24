@@ -1,29 +1,32 @@
 import type { Command } from "commander";
 import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { loadConfig } from "../../config/load.js";
 import { createProvider } from "../../engine/core/registry.js";
 import { parseMarkdownSpec } from "../../spec/parsers/markdown.js";
 import { normalizeSpec } from "../../spec/agents/normalizer.js";
 import { validateSpec } from "../../spec/agents/validator.js";
-import { writeSpecLock } from "../../spec/lock.js";
+import { readSpecNodes, writeSpecNodes } from "../../spec/specFiles.js";
 import { TaskGraph } from "../../spec/taskGraph.js";
 import { JiraClient } from "../../integrations/jira/client.js";
 import { loadJiraCredentials } from "../../integrations/jira/credentials.js";
+import { commitPaths } from "../../integrations/git/worktree.js";
 import type { RawSpecInput } from "../../spec/rawInput.js";
 import type { SpecNode } from "../../spec/schema.js";
 
 export function registerSpecCommand(program: Command): void {
-  const spec = program.command("spec").description("Ingest spec sources into spec.lock.json");
+  const spec = program.command("spec").description("Ingest spec sources into specs/<id>.md");
 
   spec
     .command("add [file]")
-    .description("Normalize a Markdown/text spec file, or Jira issues matching --jira <jql>, into spec.lock.json")
+    .description("Normalize a Markdown/text spec file, or Jira issues matching --jira <jql>, into specs/<id>.md")
     .option("--jira <jql>", "JQL query selecting Jira issues to ingest instead of a file")
     .action(async (file: string | undefined, opts: { jira?: string }) => {
       if (!file && !opts.jira) {
         throw new Error("Provide a spec file path or --jira <jql>.");
       }
 
+      const repoRoot = process.cwd();
       const config = await loadConfig();
       const provider = createProvider(config);
 
@@ -35,6 +38,8 @@ export function registerSpecCommand(program: Command): void {
         console.log("No spec sections found.");
         return;
       }
+
+      const existingIds = new Set((await readSpecNodes(repoRoot)).map((n) => n.id));
 
       const nodes: SpecNode[] = [];
       for (const raw of rawInputs) {
@@ -48,9 +53,35 @@ export function registerSpecCommand(program: Command): void {
         nodes.push(node);
       }
 
-      const lock = await writeSpecLock(nodes);
-      new TaskGraph(lock.nodes); // validates the merged graph is acyclic and dependency-complete
-      console.log(`Wrote spec.lock.json with ${lock.nodes.length} task(s).`);
+      const changedPaths = await writeSpecNodes(nodes, repoRoot);
+      const allNodes = await readSpecNodes(repoRoot);
+      new TaskGraph(allNodes); // validates the merged graph is acyclic and dependency-complete
+
+      if (changedPaths.length === 0) {
+        console.log(`No changes — ${allNodes.length} task(s) in specs/ already up to date.`);
+        return;
+      }
+
+      const changedIds = changedPaths.map((p) => path.basename(p, ".md"));
+      const added = changedIds.filter((id) => !existingIds.has(id));
+      const updated = changedIds.filter((id) => existingIds.has(id));
+      const message = [
+        "specos: spec —",
+        added.length > 0 ? `add ${added.join(", ")}` : "",
+        updated.length > 0 ? `update ${updated.join(", ")}` : "",
+      ]
+        .filter((part) => part.length > 0)
+        .join(" ");
+
+      const committed = await commitPaths(
+        repoRoot,
+        changedPaths.map((p) => path.relative(repoRoot, p)),
+        message,
+      );
+      console.log(
+        `Wrote ${changedPaths.length} of ${allNodes.length} task(s) to specs/` +
+          (committed ? " and committed the change." : "."),
+      );
     });
 }
 

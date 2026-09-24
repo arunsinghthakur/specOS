@@ -24,13 +24,6 @@ export type SpecSource = z.infer<typeof SpecSourceSchema>;
 export const NormalizedSpecSchema = SpecNodeSchema.omit({ id: true, source: true });
 export type NormalizedSpec = z.infer<typeof NormalizedSpecSchema>;
 
-export const SpecLockSchema = z.object({
-  version: z.literal(1).default(1),
-  generatedAt: z.string(),
-  nodes: z.array(SpecNodeSchema),
-});
-export type SpecLock = z.infer<typeof SpecLockSchema>;
-
 export const ValidationResultSchema = z.object({
   ambiguous: z.boolean(),
   questions: z.array(z.string()).default([]),

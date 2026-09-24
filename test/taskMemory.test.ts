@@ -33,6 +33,15 @@ describe("buildWorkerSystemPrompt", () => {
     const prompt = buildWorkerSystemPrompt(node, "", []);
     expect(prompt).not.toContain("Project conventions:\n\n");
     expect(prompt).not.toContain("Already completed by other agents");
+    expect(prompt).not.toContain("attempted before");
+  });
+
+  it("includes prior reviewer feedback on a retry", () => {
+    const prompt = buildWorkerSystemPrompt(node, "", [], [
+      { taskId: "login", feedback: "Missing a test for invalid credentials.", timestamp: "t" },
+    ]);
+    expect(prompt).toContain("rejected by the reviewer");
+    expect(prompt).toContain("Missing a test for invalid credentials.");
   });
 });
 

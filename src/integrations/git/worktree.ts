@@ -39,6 +39,16 @@ export async function commitAll(worktreePath: string, message: string): Promise<
   return true;
 }
 
+/** Stages and commits only the given paths (never `-A`) — used to commit generated files like specs/ without touching unrelated work-in-progress changes. */
+export async function commitPaths(repoRoot: string, paths: string[], message: string): Promise<boolean> {
+  if (paths.length === 0) return false;
+  await git(repoRoot, ["add", "--", ...paths]);
+  const status = await git(repoRoot, ["status", "--porcelain", "--", ...paths]);
+  if (!status) return false;
+  await git(repoRoot, ["commit", "-m", message]);
+  return true;
+}
+
 /** Attempts a merge without committing, then aborts — used to detect conflicts before touching the integration branch. */
 export async function dryRunMerge(repoRoot: string, branch: string, integrationBranch: string): Promise<boolean> {
   try {
