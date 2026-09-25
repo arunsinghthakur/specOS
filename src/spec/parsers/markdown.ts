@@ -1,14 +1,8 @@
 import path from "node:path";
 import type { RawSpecInput } from "../rawInput.js";
+import { slugify } from "../slug.js";
 
 const HEADING_RE = /^#{1,2}\s+(.*)$/;
-
-function slugify(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
 
 /**
  * Splits a Markdown/text spec file into one RawSpecInput per top-level (#/##) section.

@@ -61,4 +61,6 @@ npm run build
 log "Linking the 'specos' command onto your PATH"
 npm link
 
-log "Done. Run 'specos --help' to get started."
+log "Done."
+echo
+specos setup || true

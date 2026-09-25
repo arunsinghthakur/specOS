@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { access, rm } from "node:fs/promises";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -14,6 +15,14 @@ export interface WorktreeHandle {
   path: string;
 }
 
+function branchNameFor(taskId: string): string {
+  return `specos/${taskId}`;
+}
+
+function worktreePathFor(taskId: string, worktreeDir: string): string {
+  return `${worktreeDir}/${taskId}`;
+}
+
 /** Creates a new branch off `baseBranch` and checks it out into an isolated worktree. */
 export async function createWorktree(
   repoRoot: string,
@@ -21,19 +30,63 @@ export async function createWorktree(
   baseBranch: string,
   worktreeDir = ".specos/worktrees",
 ): Promise<WorktreeHandle> {
-  const branch = `specos/${taskId}`;
-  const worktreePath = `${worktreeDir}/${taskId}`;
+  const branch = branchNameFor(taskId);
+  const worktreePath = worktreePathFor(taskId, worktreeDir);
   await git(repoRoot, ["worktree", "add", "-b", branch, worktreePath, baseBranch]);
   return { taskId, branch, path: `${repoRoot}/${worktreePath}` };
+}
+
+/**
+ * Discards a leftover worktree/branch for `taskId` left behind by an earlier run that was
+ * killed or crashed before the task reached review/merged. Safe to call unconditionally before
+ * (re)assigning a task: the orchestrator only ever does that for a task whose previous attempt
+ * never got that far, so there's never real reviewed/merged work to lose. Returns true if there
+ * was anything to discard.
+ *
+ * Checks the branch and the on-disk directory independently, and clears each one that exists —
+ * `git worktree remove --force` has been observed to successfully deregister a worktree (it drops
+ * out of `git worktree list`, and its branch is gone) while still leaving a residual directory
+ * behind at the target path, which then makes the next `git worktree add` fail with "already
+ * exists" even though git itself no longer has any record of it.
+ */
+export async function discardStaleWorktree(
+  repoRoot: string,
+  taskId: string,
+  worktreeDir = ".specos/worktrees",
+): Promise<boolean> {
+  const branch = branchNameFor(taskId);
+  const path = `${repoRoot}/${worktreePathFor(taskId, worktreeDir)}`;
+  const hadBranch = await currentBranchExists(repoRoot, branch);
+
+  if (hadBranch) {
+    await removeWorktree(repoRoot, { taskId, branch, path }).catch(() => undefined);
+    await deleteBranch(repoRoot, branch).catch(() => undefined);
+  }
+
+  const hadResidualDir = await access(path)
+    .then(() => true)
+    .catch(() => false);
+  if (hadResidualDir) {
+    await rm(path, { recursive: true, force: true });
+  }
+
+  return hadBranch || hadResidualDir;
 }
 
 export async function removeWorktree(repoRoot: string, handle: WorktreeHandle): Promise<void> {
   await git(repoRoot, ["worktree", "remove", "--force", handle.path]);
 }
 
+/**
+ * Commits everything in the worker's worktree except `.specos/` — excluded by pathspec, not just
+ * relying on the target repo's own .gitignore, since `.specos/` becoming tracked even once means
+ * every worktree checked out afterward carries and re-commits it too (observed live: a target
+ * project with no pre-existing .gitignore ended up with .specos/ — transcripts, audit log, even a
+ * nested worktree copy — baked into its own history).
+ */
 export async function commitAll(worktreePath: string, message: string): Promise<boolean> {
-  await git(worktreePath, ["add", "-A"]);
-  const status = await git(worktreePath, ["status", "--porcelain"]);
+  await git(worktreePath, ["add", "-A", "--", ".", ":!.specos"]);
+  const status = await git(worktreePath, ["status", "--porcelain", "--", ".", ":!.specos"]);
   if (!status) return false;
   await git(worktreePath, ["commit", "-m", message]);
   return true;

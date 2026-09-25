@@ -1,5 +1,6 @@
 import { query, type Options, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import type {
+  AgentActivityEvent,
   AgentHandle,
   AgentMessage,
   AgentProvider,
@@ -21,14 +22,22 @@ class ClaudeAgentHandle implements AgentHandle {
   private readonly input: AsyncQueue<SDKUserMessage>;
   private readonly session: AsyncGenerator<any, void>;
   private readonly transcript: AgentMessage[] = [];
+  private readonly onActivity?: (event: AgentActivityEvent) => void;
   private usage: TokenUsage = zeroUsage();
   private turn = 0;
 
-  constructor(id: string, role: AgentRole, input: AsyncQueue<SDKUserMessage>, session: AsyncGenerator<any, void>) {
+  constructor(
+    id: string,
+    role: AgentRole,
+    input: AsyncQueue<SDKUserMessage>,
+    session: AsyncGenerator<any, void>,
+    onActivity?: (event: AgentActivityEvent) => void,
+  ) {
     this.id = id;
     this.role = role;
     this.input = input;
     this.session = session;
+    this.onActivity = onActivity;
   }
 
   async sendMessage(content: string): Promise<AgentRunResult> {
@@ -44,7 +53,10 @@ class ClaudeAgentHandle implements AgentHandle {
     for await (const message of this.session) {
       if (message.type === "assistant") {
         for (const block of message.message?.content ?? []) {
-          if (block.type === "text") assistantChunks.push(block.text);
+          if (block.type === "text") {
+            assistantChunks.push(block.text);
+            this.onActivity?.({ type: "text", text: block.text });
+          }
         }
       } else if (message.type === "result") {
         this.applyUsage(message.modelUsage ?? {});
@@ -82,7 +94,20 @@ export class ClaudeAgentProvider implements AgentProvider {
   async createAgent(options: CreateAgentOptions): Promise<AgentHandle> {
     const id = `${options.role}-${++this.counter}`;
     const input = new AsyncQueue<SDKUserMessage>();
-    const mcpServer = buildMcpServer(`specos-${options.role}`, options.tools);
+    // Notify the moment a tool is invoked, before its (possibly slow) handler runs — that's
+    // what makes a long `run_command` or `write_file` call show up live instead of only after
+    // it finishes. Every ToolDefinition flows through here regardless of role, so this is the
+    // one place that needs to know about `onActivity`, not each tool implementation.
+    const tools = options.onActivity
+      ? options.tools.map((def) => ({
+          ...def,
+          handler: (toolInput: Record<string, unknown>) => {
+            options.onActivity?.({ type: "tool_call", tool: def.name, input: toolInput });
+            return def.handler(toolInput);
+          },
+        }))
+      : options.tools;
+    const mcpServer = buildMcpServer(`specos-${options.role}`, tools);
 
     const queryOptions: Options = {
       cwd: options.cwd,
@@ -101,6 +126,6 @@ export class ClaudeAgentProvider implements AgentProvider {
     };
 
     const session = query({ prompt: input, options: queryOptions }) as AsyncGenerator<any, void>;
-    return new ClaudeAgentHandle(id, options.role, input, session);
+    return new ClaudeAgentHandle(id, options.role, input, session, options.onActivity);
   }
 }

@@ -1,5 +1,6 @@
 import { loadConfig } from "../config/load.js";
 import { createProvider } from "../engine/core/registry.js";
+import { applyStoredAnthropicKey } from "../integrations/anthropic/apply.js";
 import { StateStore } from "../storage/stateStore.js";
 import { CliApprovalGateHandler } from "../harness/approvalGate.js";
 import { runOrchestrator } from "../orchestrator/orchestrator.js";
@@ -22,6 +23,7 @@ export interface RunActionOptions {
 export async function executeRun(opts: RunActionOptions): Promise<void> {
   const repoRoot = process.cwd();
   const config = await loadConfig();
+  await applyStoredAnthropicKey();
   const provider = createProvider(config);
   const stateStore = new StateStore(repoRoot);
   const approvalGate = new CliApprovalGateHandler(config, opts.yes);

@@ -81,7 +81,42 @@ function providerThatGivesUp(): AgentProvider {
   };
 }
 
+function providerThatMustNotBeCalled(): AgentProvider {
+  return {
+    name: "fake",
+    async createAgent(): Promise<AgentHandle> {
+      throw new Error("should never be called — this isn't a content conflict, an agent can't fix it");
+    },
+  };
+}
+
 describe("resolveConflict", () => {
+  it("reports the real git error, without invoking the agent, when the merge can't even start", async () => {
+    const repo = await mkdtemp(path.join(tmpdir(), "specos-conflict-"));
+    try {
+      await initRepo(repo);
+      const handle = await createWorktree(repo, "task-x", "main");
+      await writeFile(path.join(handle.path, ".gitignore"), "node_modules/\n", "utf-8");
+      await commitAll(handle.path, "worker adds .gitignore");
+
+      // Untracked (not committed) at the integration branch, at the same path the branch adds —
+      // git refuses to even start the merge, leaving zero conflicted files.
+      await writeFile(path.join(repo, ".gitignore"), "dist/\n", "utf-8");
+
+      const result = await resolveConflict(providerThatMustNotBeCalled(), node, repo, handle.branch, "main");
+
+      expect(result.resolved).toBe(false);
+      expect(result.summary).not.toBe("no conflicting files found on real merge attempt");
+      expect(result.summary).toContain(".gitignore");
+
+      const status = await execFileAsync("git", ["status", "--porcelain"], { cwd: repo });
+      expect(status.stdout).toContain(".gitignore"); // untracked file untouched, working tree otherwise clean
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+
   it("leaves the merge staged (unmerged paths cleared) when the agent resolves it", async () => {
     const repo = await mkdtemp(path.join(tmpdir(), "specos-conflict-"));
     try {

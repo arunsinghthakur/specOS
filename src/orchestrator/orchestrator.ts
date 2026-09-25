@@ -1,4 +1,4 @@
-import type { AgentProvider } from "../engine/core/types.js";
+import type { AgentActivityEvent, AgentProvider } from "../engine/core/types.js";
 import type { Config } from "../config/schema.js";
 import type { ApprovalGateHandler } from "../harness/approvalGate.js";
 import { StateStore } from "../storage/stateStore.js";
@@ -19,6 +19,7 @@ import {
   commitMerge,
   createWorktree,
   commitAll,
+  discardStaleWorktree,
   dryRunMerge,
   mergeBranch,
   removeWorktree,
@@ -43,6 +44,39 @@ export interface OrchestratorDeps {
 
 type TaskOutcome = "merged" | "blocked" | "failed";
 
+function tag(taskId: string): string {
+  return `[${taskId}]`;
+}
+
+const TOOL_SUMMARY_FIELD: Record<string, string> = {
+  read_file: "path",
+  write_file: "path",
+  list_dir: "path",
+  run_command: "command",
+};
+
+function summarizeToolCall(toolName: string, input: Record<string, unknown>): string {
+  const field = TOOL_SUMMARY_FIELD[toolName];
+  const detail = field && input[field] !== undefined ? String(input[field]) : JSON.stringify(input);
+  return `${toolName} ${detail}`;
+}
+
+const MAX_ACTIVITY_TEXT_LENGTH = 160;
+
+/** Prints an agent's live tool calls and narration text as they happen, tagged by task id so concurrent tasks stay distinguishable. */
+function activityLogger(taskId: string): (event: AgentActivityEvent) => void {
+  return (event) => {
+    if (event.type === "tool_call") {
+      console.log(`${tag(taskId)} → ${summarizeToolCall(event.tool, event.input)}`);
+    } else {
+      const text = event.text.trim();
+      if (!text) return;
+      const truncated = text.length > MAX_ACTIVITY_TEXT_LENGTH ? `${text.slice(0, MAX_ACTIVITY_TEXT_LENGTH)}…` : text;
+      console.log(`${tag(taskId)} · ${truncated}`);
+    }
+  };
+}
+
 /** `budget.maxUsd` isn't enforced yet — we don't have a live per-model pricing table to convert it against. */
 function isBudgetExceeded(deps: OrchestratorDeps): boolean {
   const maxTokens = deps.config.budget.maxTokens;
@@ -62,6 +96,7 @@ export async function runOrchestrator(deps: OrchestratorDeps): Promise<void> {
     throw new Error("No tasks in specs/ — run `specos spec add <file>` first.");
   }
   const graph = new TaskGraph(nodes);
+  console.log(`${graph.size} task(s) in the graph — running up to ${deps.config.concurrency} at a time.`);
   const projectMemory = await loadProjectMemory(deps.repoRoot);
   const swarmMemory = new SwarmMemory(deps.repoRoot);
   const feedbackMemory = new FeedbackMemory(deps.repoRoot);
@@ -114,7 +149,6 @@ export async function runOrchestrator(deps: OrchestratorDeps): Promise<void> {
       completed.add(id);
     } else {
       settled.add(id);
-      console.log(`Task ${id} ended in state "${outcome}".`);
     }
 
     if (breaker.isTripped()) {
@@ -134,28 +168,43 @@ async function processTask(
   mergeMutex: Mutex,
 ): Promise<TaskOutcome> {
   const { stateStore, repoRoot, config } = deps;
+  const startedAt = Date.now();
+  const elapsed = () => `${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
+  const onActivity = activityLogger(node.id);
+
   stateStore.upsertTask(node.id, "pending");
   assertTransition("pending", "assigned");
   stateStore.upsertTask(node.id, "assigned");
   await audit.record(node.id, "assigned");
+  console.log(`${tag(node.id)} assigned — preparing worktree`);
 
   try {
+    if (await discardStaleWorktree(repoRoot, node.id)) {
+      console.log(`${tag(node.id)} found a leftover worktree/branch from an earlier interrupted run — discarded it before retrying`);
+    }
     const worktree = await createWorktree(repoRoot, node.id, config.integrationBranch);
     stateStore.upsertTask(node.id, "assigned", worktree.path, worktree.branch);
 
     assertTransition("assigned", "in_progress");
     stateStore.upsertTask(node.id, "in_progress");
     await audit.record(node.id, "in_progress");
+    console.log(`${tag(node.id)} worker starting in ${worktree.path}`);
 
     const completedSummaries = await swarmMemory.all();
     const priorFeedback = await feedbackMemory.forTask(node.id);
     const systemPrompt = buildWorkerSystemPrompt(node, projectMemory, completedSummaries, priorFeedback);
 
     const workerResult = await retryWithBackoff(
-      () => withTimeout(runWorker(deps.provider, node, worktree.path, systemPrompt), WORKER_TIMEOUT_MS, `worker:${node.id}`),
+      () =>
+        withTimeout(
+          runWorker(deps.provider, node, worktree.path, systemPrompt, onActivity),
+          WORKER_TIMEOUT_MS,
+          `worker:${node.id}`,
+        ),
       RETRY_OPTIONS,
       `worker:${node.id}`,
     );
+    console.log(`${tag(node.id)} worker finished after ${elapsed()} — committing and sending for review`);
     stateStore.recordUsage(node.id, workerResult.usage);
     await commitAll(worktree.path, `specos: ${node.title}`);
     await archiveTranscript(repoRoot, node.id, workerResult.transcript);
@@ -166,7 +215,7 @@ async function processTask(
     await audit.record(node.id, "review", { summary });
 
     const review = await withTimeout(
-      runReviewer(deps.provider, node, worktree.path, deps.testCommand),
+      runReviewer(deps.provider, node, worktree.path, deps.testCommand, onActivity),
       REVIEW_TIMEOUT_MS,
       `reviewer:${node.id}`,
     );
@@ -176,18 +225,21 @@ async function processTask(
       assertTransition("review", "blocked");
       stateStore.upsertTask(node.id, "blocked");
       await feedbackMemory.append({ taskId: node.id, feedback: review.feedback, timestamp: new Date().toISOString() });
-      console.warn(`Reviewer rejected ${node.id}: ${review.feedback}`);
+      console.warn(`${tag(node.id)} blocked after ${elapsed()} — reviewer rejected: ${review.feedback}`);
       return "blocked";
     }
+    console.log(`${tag(node.id)} reviewer approved — merging`);
 
-    const mergeSummary = await mergeMutex.runExclusive(() => mergeIntoIntegration(node, worktree, deps, review.feedback));
+    const mergeSummary = await mergeMutex.runExclusive(() =>
+      mergeIntoIntegration(node, worktree, deps, review.feedback, onActivity),
+    );
     if (!mergeSummary.merged) {
       assertTransition("review", "blocked");
       stateStore.upsertTask(node.id, "blocked");
       if (mergeSummary.reason) {
         await feedbackMemory.append({ taskId: node.id, feedback: mergeSummary.reason, timestamp: new Date().toISOString() });
       }
-      console.warn(`Merge blocked for ${node.id}: ${mergeSummary.reason}`);
+      console.warn(`${tag(node.id)} blocked after ${elapsed()} — merge blocked: ${mergeSummary.reason}`);
       return "blocked";
     }
 
@@ -200,10 +252,15 @@ async function processTask(
       timestamp: new Date().toISOString(),
     });
     await removeWorktree(repoRoot, worktree).catch(() => undefined);
+    console.log(
+      `${tag(node.id)} merged after ${elapsed()}${mergeSummary.conflictResolved ? " (conflict auto-resolved)" : ""}`,
+    );
     return "merged";
   } catch (err) {
+    const message = err instanceof EscalationError ? err.message : String(err);
     stateStore.upsertTask(node.id, "failed");
-    await audit.record(node.id, "failed", { error: err instanceof EscalationError ? err.message : String(err) });
+    await audit.record(node.id, "failed", { error: message });
+    console.error(`${tag(node.id)} failed after ${elapsed()} — ${message}`);
     return "failed";
   }
 }
@@ -220,6 +277,7 @@ async function mergeIntoIntegration(
   worktree: { path: string; branch: string },
   deps: OrchestratorDeps,
   reviewFeedback: string,
+  onActivity?: (event: AgentActivityEvent) => void,
 ): Promise<MergeAttemptOutcome> {
   const { repoRoot, config, approvalGate, provider } = deps;
   const clean = await dryRunMerge(repoRoot, worktree.branch, config.integrationBranch);
@@ -235,7 +293,7 @@ async function mergeIntoIntegration(
     return { merged: true, conflictResolved: false };
   }
 
-  const resolution = await resolveConflict(provider, node, repoRoot, worktree.branch, config.integrationBranch);
+  const resolution = await resolveConflict(provider, node, repoRoot, worktree.branch, config.integrationBranch, onActivity);
   if (!resolution.resolved) {
     return { merged: false, reason: `conflict could not be auto-resolved: ${resolution.summary}`, conflictResolved: false };
   }

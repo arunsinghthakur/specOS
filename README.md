@@ -87,15 +87,43 @@ compiled `dist/`, not your source directly.
 Alternative without linking: run `npx tsx src/cli/index.ts <command>` from inside the `specOS`
 directory (useful while developing specOS itself, since it skips the build step).
 
-### Claude Agent SDK auth
+`install.sh` runs `specos setup` automatically as its last step (see below) — from an interactive
+terminal it'll ask for credentials right away; from a piped/non-interactive install it skips
+straight to the quick-start banner.
 
-specOS's default provider spawns the `claude` CLI under the hood (via the Claude Agent SDK), so
-it authenticates the same way your `claude` CLI already does — no separate API key setup needed
-if `claude` already works in your terminal. If your `claude` CLI runs through a custom endpoint
-(e.g. an internal gateway configured via `~/.claude/settings.json`'s `env.ANTHROPIC_BASE_URL` and
-`apiKeyHelper`), make sure that same `ANTHROPIC_BASE_URL` is exported in whatever shell you run
-`specos` from — some sandboxed/CI shells don't inherit app-level environment overrides, which
-shows up as an "Invalid API key" error even though your `claude` login is fine.
+### Credentials — `specos setup` and `specos auth`
+
+```bash
+specos setup
+```
+
+An interactive wizard for the two credentials specOS can use — an Anthropic API key and Jira
+Cloud access. Press Enter to skip either one; nothing is required up front. Whatever you provide
+goes straight to your OS keychain (never a file), and it's safe to re-run anytime a credential
+wasn't handy yet.
+
+To add or update a credential later without the wizard:
+
+```bash
+specos auth anthropic --key <key>                                    # or set ANTHROPIC_API_KEY
+specos auth jira --host <url> --email <email> --token <token>        # or set JIRA_API_TOKEN
+```
+
+`specos auth jira` also writes `jira.host`/`jira.email` into the current directory's
+`specos.config.json`, so run it again from inside a project once you're ready to wire Jira into
+that project — you can omit `--token` at that point and it'll reuse whatever's already stored for
+that email.
+
+specOS's default provider spawns the `claude` CLI under the hood (via the Claude Agent SDK), so it
+authenticates the same way your `claude` CLI already does — **you don't need `specos setup`'s
+Anthropic key at all if `claude` already works in your terminal.** The stored key is only a
+fallback for when it doesn't (e.g. a fresh machine, or a sandboxed/CI shell with no `claude`
+login) — and an explicit `ANTHROPIC_API_KEY` env var always wins over it. If your `claude` CLI
+runs through a custom endpoint (e.g. an internal gateway configured via `~/.claude/settings.json`'s
+`env.ANTHROPIC_BASE_URL` and `apiKeyHelper`), make sure that same `ANTHROPIC_BASE_URL` is exported
+in whatever shell you run `specos` from — some sandboxed/CI shells don't inherit app-level
+environment overrides, which shows up as an "Invalid API key" error even though your `claude`
+login is fine.
 
 ## End-to-end usage
 
@@ -129,30 +157,40 @@ build and grade against exactly what you write here.
 
 ### 3. Ingest the spec
 
+`specos spec add` accepts a requirement from three sources — pick whichever fits:
+
 ```bash
-specos spec add spec.md
+specos spec add spec.md                                    # a Markdown/text file
+specos spec add --jira "project = PROJ AND status = 'To Do'"  # a JQL query...
+specos spec add --jira PROJ-45                                 # ...or a single card
+specos spec add --text "Add a dark mode toggle to settings"    # an ad-hoc requirement
 ```
 
-Runs the normalizer + validator agents over every section and writes one `specs/<id>.md` file per
-task — only the files that actually changed are touched and committed; re-running on unchanged
-requirements is a no-op. If the validator flags a section as ambiguous, it prints clarifying
-questions — worth fixing your spec and re-running `spec add` before planning, since the worker
-agent will otherwise have to guess.
+For Jira, set up credentials once first:
+
+```bash
+specos auth jira --host https://your-org.atlassian.net --email you@example.com --token <api-token>
+# (or set JIRA_API_TOKEN instead of --token; the token is stored in your OS keychain, never in a file)
+```
+
+Whichever source you use, every requirement goes through the same pipeline: a **normalizer
+agent** turns raw text into a structured node, then a **validator agent** checks it for ambiguity
+or missing information. If it's ambiguous, specOS asks you at most 3 high-level clarifying
+questions — one quick round, not an interrogation — folds your answers back into the raw input,
+and re-normalizes once. With `--text`, it also asks one open-ended "anything else to add?"
+afterward (skip it by just pressing Enter). Pass `--yes` to skip all of this and just print
+whatever questions the validator raised as warnings instead (useful in CI/non-interactive shells).
+
+Only the files that actually changed are written and committed; re-running on unchanged
+requirements is a no-op. `--text` without `--id` derives an id from the first few words of the
+requirement (e.g. "Add a dark mode toggle to settings" → `add-a-dark-mode-toggle`); pass `--id` to
+control it directly.
 
 Each `specs/<id>.md` is meant to be read and hand-edited like any other file in the repo — a small
 frontmatter block holds the structured fields (`id`, `priority`, `dependencies`, `source`), and
 the body is plain Markdown (title, description, acceptance criteria, non-functional requirements).
 Edit one directly and it takes effect next time you read it — `specos spec add` doesn't need to
 run again unless you're ingesting new raw input.
-
-For Jira instead of a file:
-
-```bash
-specos auth jira --host https://your-org.atlassian.net --email you@example.com --token <api-token>
-# (or set JIRA_API_TOKEN instead of --token; the token is stored in your OS keychain, never in a file)
-
-specos spec add --jira "project = PROJ AND status = 'To Do'"
-```
 
 ### 4. Inspect the plan
 
@@ -329,17 +367,22 @@ in `~/.claude/settings.json`), that same `ANTHROPIC_BASE_URL` needs to be export
 you're running `specos` from — some sandboxed/CI shells reset it to the public API default, which
 then fails against a gateway-issued key. `export ANTHROPIC_BASE_URL=<your gateway URL>` before
 running `specos` fixes it. `claude -p "hi"` in the same shell is a quick way to confirm auth works
-before blaming specOS.
+before blaming specOS. If you don't have a working `claude` login at all (e.g. a fresh machine or
+a CI runner), run `specos setup` or `specos auth anthropic --key <key>` to store a fallback
+Anthropic API key instead — but note an explicit `ANTHROPIC_API_KEY` env var always overrides it.
 
 **"The dev server failed to start"** — specOS has no dev server; it's a CLI tool, not a web app.
 Nothing to preview in a browser. Run its commands directly in a terminal instead.
 
 **A section is marked ambiguous by `spec add`** — that's the validator agent doing its job, not
-an error. Read the printed questions, tighten the acceptance criteria in your spec, and re-run
-`specos spec add <file>`. It's safe to re-run — each task writes its own `specs/<id>.md`, so tasks
-from other files are untouched, and a file whose re-normalized content is unchanged isn't
-rewritten or recommitted — but every section in *this* file gets re-normalized and re-validated
-(a fresh model call each), not just the one you changed.
+an error. By default it'll ask you up to 3 high-level clarifying questions right in the terminal
+and fold your answers back in automatically. If you ran with `--yes`, read the printed questions,
+tighten the acceptance criteria in your spec (or hand-edit the resulting `specs/<id>.md`
+directly), and re-run `specos spec add <file>`. It's safe to re-run —
+each task writes its own `specs/<id>.md`, so tasks from other files are untouched, and a file
+whose re-normalized content is unchanged isn't rewritten or recommitted — but every section in
+*this* file gets re-normalized and re-validated (a fresh model call each), not just the one you
+changed.
 
 **A task ends up `blocked`** — check `specos status` for which one, then `.specos/audit.jsonl`
 for the reviewer's feedback or the merge-conflict reason. Fix the spec/task if needed, then

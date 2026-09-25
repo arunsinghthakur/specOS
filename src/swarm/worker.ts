@@ -1,4 +1,4 @@
-import type { AgentProvider, AgentRunResult } from "../engine/core/types.js";
+import type { AgentActivityEvent, AgentProvider, AgentRunResult } from "../engine/core/types.js";
 import type { SpecNode } from "../spec/schema.js";
 import { buildWorkerTools } from "./tools.js";
 
@@ -10,6 +10,7 @@ export async function runWorker(
   node: SpecNode,
   worktreePath: string,
   systemPrompt: string,
+  onActivity?: (event: AgentActivityEvent) => void,
 ): Promise<AgentRunResult> {
   const agent = await provider.createAgent({
     role: "worker",
@@ -17,6 +18,7 @@ export async function runWorker(
     tools: buildWorkerTools(worktreePath),
     cwd: worktreePath,
     maxTurns: MAX_TURNS,
+    onActivity,
   });
   return agent.sendMessage(`Begin implementing: ${node.title}`);
 }

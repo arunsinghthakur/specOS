@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { mkdtemp, rm, access } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -11,6 +11,7 @@ import { runOrchestrator } from "../src/orchestrator/orchestrator.js";
 import { writeSpecNodes } from "../src/spec/specFiles.js";
 import { SwarmMemory } from "../src/memory/swarmMemory.js";
 import { FeedbackMemory } from "../src/memory/feedbackMemory.js";
+import { createWorktree } from "../src/integrations/git/worktree.js";
 import type { AgentHandle, AgentProvider, CreateAgentOptions, TokenUsage } from "../src/engine/core/types.js";
 import type { SpecNode } from "../src/spec/schema.js";
 
@@ -148,6 +149,94 @@ describe("runOrchestrator", () => {
       const feedback = await new FeedbackMemory(repo).forTask("feature-a");
       expect(feedback).toHaveLength(1);
       expect(feedback[0].feedback).toBe("Missing a test for the empty-input case.");
+
+      stateStore.close();
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("streams live tool-call and narration activity from the worker as it happens, not just at the end", async () => {
+    const repo = await mkdtemp(path.join(tmpdir(), "specos-orchestrator-"));
+    try {
+      await initRepo(repo);
+      await writeSpecNodes([node("feature-a", "Feature A")], repo);
+
+      const streamingProvider: AgentProvider = {
+        name: "fake-streaming",
+        async createAgent(options: CreateAgentOptions): Promise<AgentHandle> {
+          return {
+            id: `${options.role}-fake`,
+            role: options.role,
+            async sendMessage() {
+              if (options.role === "worker") {
+                options.onActivity?.({ type: "text", text: "Writing the storage module now" });
+                options.onActivity?.({ type: "tool_call", tool: "write_file", input: { path: "Feature A.txt" } });
+                const write = options.tools.find((t) => t.name === "write_file")!;
+                await write.handler({ path: "Feature A.txt", content: "implemented\n" });
+                return { finalMessage: "DONE: implemented Feature A", transcript: [], usage: ZERO_USAGE };
+              }
+              if (options.role === "reviewer") {
+                return { finalMessage: '{"approved": true, "feedback": "looks good"}', transcript: [], usage: ZERO_USAGE };
+              }
+              return { finalMessage: "DONE: n/a", transcript: [], usage: ZERO_USAGE };
+            },
+            getUsage: () => ZERO_USAGE,
+          };
+        },
+      };
+
+      const config = ConfigSchema.parse({ concurrency: 1 });
+      const stateStore = new StateStore(repo);
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      let lines: string[];
+
+      try {
+        await runOrchestrator({
+          provider: streamingProvider,
+          config,
+          stateStore,
+          repoRoot: repo,
+          approvalGate: new AutoApproveGateHandler(),
+        });
+      } finally {
+        lines = logSpy.mock.calls.map((call) => call.join(" "));
+        logSpy.mockRestore();
+      }
+
+      expect(lines).toContainEqual("[feature-a] · Writing the storage module now");
+      expect(lines).toContainEqual("[feature-a] → write_file Feature A.txt");
+
+      stateStore.close();
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("recovers a task whose worktree/branch was left behind by an earlier killed run, instead of failing", async () => {
+    const repo = await mkdtemp(path.join(tmpdir(), "specos-orchestrator-"));
+    try {
+      await initRepo(repo);
+      await writeSpecNodes([node("feature-a", "Feature A")], repo);
+
+      // Simulate `specos run` being killed mid-task: the worktree/branch from that attempt is
+      // still there, and the state store never advanced past "in_progress".
+      await createWorktree(repo, "feature-a", "main");
+      const config = ConfigSchema.parse({ concurrency: 1 });
+      const stateStore = new StateStore(repo);
+      stateStore.upsertTask("feature-a", "in_progress");
+
+      await runOrchestrator({
+        provider: fakeProvider(),
+        config,
+        stateStore,
+        repoRoot: repo,
+        approvalGate: new AutoApproveGateHandler(),
+      });
+
+      const tasks = stateStore.listTasks();
+      expect(tasks.map((t) => t.status)).toEqual(["merged"]);
+      await expect(access(path.join(repo, "Feature A.txt"))).resolves.toBeUndefined();
 
       stateStore.close();
     } finally {

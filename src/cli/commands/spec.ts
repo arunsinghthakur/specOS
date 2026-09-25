@@ -3,36 +3,60 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { loadConfig } from "../../config/load.js";
 import { createProvider } from "../../engine/core/registry.js";
+import { applyStoredAnthropicKey } from "../../integrations/anthropic/apply.js";
 import { parseMarkdownSpec } from "../../spec/parsers/markdown.js";
-import { normalizeSpec } from "../../spec/agents/normalizer.js";
-import { validateSpec } from "../../spec/agents/validator.js";
+import { parseTextSpec } from "../../spec/parsers/text.js";
+import { ingestRawInput } from "../../spec/ingest.js";
 import { readSpecNodes, writeSpecNodes } from "../../spec/specFiles.js";
 import { TaskGraph } from "../../spec/taskGraph.js";
 import { JiraClient } from "../../integrations/jira/client.js";
 import { loadJiraCredentials } from "../../integrations/jira/credentials.js";
 import { commitPaths } from "../../integrations/git/worktree.js";
+import { askUser } from "../prompt.js";
 import type { RawSpecInput } from "../../spec/rawInput.js";
 import type { SpecNode } from "../../spec/schema.js";
+
+const JIRA_ISSUE_KEY_RE = /^[A-Za-z][A-Za-z0-9]*-\d+$/;
+
+interface AddOptions {
+  jira?: string;
+  text?: string;
+  id?: string;
+  yes?: boolean;
+}
 
 export function registerSpecCommand(program: Command): void {
   const spec = program.command("spec").description("Ingest spec sources into specs/<id>.md");
 
   spec
     .command("add [file]")
-    .description("Normalize a Markdown/text spec file, or Jira issues matching --jira <jql>, into specs/<id>.md")
-    .option("--jira <jql>", "JQL query selecting Jira issues to ingest instead of a file")
-    .action(async (file: string | undefined, opts: { jira?: string }) => {
-      if (!file && !opts.jira) {
-        throw new Error("Provide a spec file path or --jira <jql>.");
+    .description(
+      "Normalize a Markdown/text spec file, a Jira card or JQL query (--jira), or an ad-hoc " +
+        "requirement (--text) into specs/<id>.md",
+    )
+    .option("--jira <jql-or-key>", "a JQL query, or a single Jira issue key (e.g. PROJ-45), to ingest instead of a file")
+    .option("--text <requirement>", "ingest one ad-hoc plain-text requirement instead of a file")
+    .option("--id <id>", "task id to use with --text (default: a slug of its first few words)")
+    .option("--yes", "skip interactive clarification — just warn on ambiguity instead of asking questions")
+    .action(async (file: string | undefined, opts: AddOptions) => {
+      const sources = [file, opts.jira, opts.text].filter((v) => v !== undefined);
+      if (sources.length === 0) {
+        throw new Error("Provide a spec file path, --jira <jql-or-key>, or --text <requirement>.");
+      }
+      if (sources.length > 1) {
+        throw new Error("Provide only one of: a spec file, --jira, or --text.");
       }
 
       const repoRoot = process.cwd();
       const config = await loadConfig();
+      await applyStoredAnthropicKey();
       const provider = createProvider(config);
 
       const rawInputs: RawSpecInput[] = file
         ? parseMarkdownSpec(file, await readFile(file, "utf-8"))
-        : await fetchJiraInputs(opts.jira!, config);
+        : opts.text
+          ? [parseTextSpec(opts.text, opts.id)]
+          : await fetchJiraInputs(opts.jira!, config);
 
       if (rawInputs.length === 0) {
         console.log("No spec sections found.");
@@ -44,12 +68,11 @@ export function registerSpecCommand(program: Command): void {
       const nodes: SpecNode[] = [];
       for (const raw of rawInputs) {
         console.log(`Normalizing ${raw.id}...`);
-        const node = await normalizeSpec(provider, raw);
-        const validation = await validateSpec(provider, node);
-        if (validation.ambiguous) {
-          console.warn(`  ambiguous — clarify before planning:`);
-          for (const q of validation.questions) console.warn(`    - ${q}`);
-        }
+        const node = await ingestRawInput(provider, raw, {
+          askUser: opts.yes ? undefined : askUser,
+          warn: (message) => console.warn(`  ${message}`),
+          offerMoreDetails: Boolean(opts.text),
+        });
         nodes.push(node);
       }
 
@@ -85,7 +108,7 @@ export function registerSpecCommand(program: Command): void {
     });
 }
 
-async function fetchJiraInputs(jql: string, config: Awaited<ReturnType<typeof loadConfig>>): Promise<RawSpecInput[]> {
+async function fetchJiraInputs(jqlOrKey: string, config: Awaited<ReturnType<typeof loadConfig>>): Promise<RawSpecInput[]> {
   if (!config.jira?.host || !config.jira?.email) {
     throw new Error("Jira is not configured. Run `specos auth jira --host <url> --email <email>` first.");
   }
@@ -94,5 +117,8 @@ async function fetchJiraInputs(jql: string, config: Awaited<ReturnType<typeof lo
     throw new Error(`No stored Jira credentials for ${config.jira.email}. Run \`specos auth jira\` first.`);
   }
   const client = new JiraClient({ host: config.jira.host, credentials });
+  // A bare issue key (e.g. "PROJ-45") is a common enough shorthand for "just this one card" that
+  // it's worth accepting directly, rather than making every single-card ingest spell out JQL.
+  const jql = JIRA_ISSUE_KEY_RE.test(jqlOrKey.trim()) ? `key = "${jqlOrKey.trim()}"` : jqlOrKey;
   return client.searchIssues(jql);
 }

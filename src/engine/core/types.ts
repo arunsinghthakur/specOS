@@ -34,6 +34,11 @@ export interface AgentRunResult {
   usage: TokenUsage;
 }
 
+/** A live, mid-turn event a provider can surface as an agent works — a tool call the moment it's invoked, or a chunk of the agent's own narration text. */
+export type AgentActivityEvent =
+  | { type: "tool_call"; tool: string; input: Record<string, unknown> }
+  | { type: "text"; text: string };
+
 export interface AgentHandle {
   id: string;
   role: AgentRole;
@@ -48,6 +53,8 @@ export interface CreateAgentOptions {
   /** Working directory the agent's filesystem tools are sandboxed to (e.g. a worktree path). */
   cwd: string;
   maxTurns?: number;
+  /** Optional live progress hook. A provider that can't support it (or a caller that doesn't need it) simply never calls/passes it. */
+  onActivity?: (event: AgentActivityEvent) => void;
 }
 
 export interface AgentProvider {

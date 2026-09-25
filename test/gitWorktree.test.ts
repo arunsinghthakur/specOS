@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
@@ -49,6 +49,32 @@ describe("git worktree integration", () => {
       await initRepo(repo);
       const handle = await createWorktree(repo, "task-2", "main");
       expect(await commitAll(handle.path, "no-op")).toBe(false);
+      await removeWorktree(repo, handle);
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("never commits .specos/, even when the target repo's own .gitignore doesn't exclude it", async () => {
+    const repo = await mkdtemp(path.join(tmpdir(), "specos-git-"));
+    try {
+      await initRepo(repo); // deliberately no .gitignore entry for .specos/ here
+      const handle = await createWorktree(repo, "task-specos", "main");
+
+      await writeFile(path.join(handle.path, "feature.txt"), "real work\n", "utf-8");
+      await mkdir(path.join(handle.path, ".specos"), { recursive: true });
+      await writeFile(path.join(handle.path, ".specos", "audit.jsonl"), '{"event":"assigned"}\n', "utf-8");
+
+      const committed = await commitAll(handle.path, "add feature");
+      expect(committed).toBe(true);
+
+      const tracked = await execFileAsync("git", ["ls-tree", "-r", "HEAD", "--name-only"], { cwd: handle.path });
+      expect(tracked.stdout).toContain("feature.txt");
+      expect(tracked.stdout).not.toContain(".specos");
+
+      const status = await execFileAsync("git", ["status", "--porcelain"], { cwd: handle.path });
+      expect(status.stdout).toContain(".specos/"); // still there on disk, just never staged/committed
+
       await removeWorktree(repo, handle);
     } finally {
       await rm(repo, { recursive: true, force: true });

@@ -1,10 +1,10 @@
-import type { AgentProvider } from "../engine/core/types.js";
+import type { AgentActivityEvent, AgentProvider } from "../engine/core/types.js";
 import type { SpecNode } from "../spec/schema.js";
 import { abortMerge, attemptRealMerge, listUnmergedPaths } from "../integrations/git/worktree.js";
 import { buildWorkerTools } from "./tools.js";
 import { extractDoneSummary } from "../memory/taskMemory.js";
 
-const MAX_TURNS = 20;
+const MAX_TURNS = 40;
 
 export interface ConflictResolutionResult {
   /** True when the working tree has no unmerged paths left — caller still must commit or abort. */
@@ -39,17 +39,30 @@ export async function resolveConflict(
   repoRoot: string,
   branch: string,
   integrationBranch: string,
+  onActivity?: (event: AgentActivityEvent) => void,
 ): Promise<ConflictResolutionResult> {
+  let mergeError: string | undefined;
   try {
     await attemptRealMerge(repoRoot, branch, integrationBranch);
-  } catch {
-    // expected: git merge exits non-zero when it leaves conflict markers
+  } catch (err) {
+    // Expected when it's a real conflict — git exits non-zero and leaves conflict markers.
+    // But git also exits non-zero, with *no* conflict markers at all, for problems that have
+    // nothing to do with content conflicts (e.g. an untracked file at the integration branch
+    // colliding with one the incoming branch adds) — keep the message so that case is reported
+    // usefully below instead of as a bare "no conflicting files found".
+    const error = err as { stderr?: string; message: string };
+    mergeError = (error.stderr || error.message).trim();
   }
 
   const conflictedFiles = await listUnmergedPaths(repoRoot);
   if (conflictedFiles.length === 0) {
     await abortMerge(repoRoot);
-    return { resolved: false, summary: "no conflicting files found on real merge attempt" };
+    return {
+      resolved: false,
+      summary: mergeError
+        ? `merge could not even start (not a content conflict — needs a human to fix the integration branch's working tree, not an AI edit): ${mergeError}`
+        : "merge attempt produced no changes and no conflicts — nothing to resolve",
+    };
   }
 
   const agent = await provider.createAgent({
@@ -58,6 +71,7 @@ export async function resolveConflict(
     tools: buildWorkerTools(repoRoot),
     cwd: repoRoot,
     maxTurns: MAX_TURNS,
+    onActivity,
   });
 
   const result = await agent.sendMessage(

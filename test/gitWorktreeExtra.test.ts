@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
@@ -9,6 +9,7 @@ import {
   createWorktree,
   currentBranchExists,
   deleteBranch,
+  discardStaleWorktree,
   pushBranch,
   removeWorktree,
 } from "../src/integrations/git/worktree.js";
@@ -45,6 +46,60 @@ describe("currentBranchExists / deleteBranch", () => {
     try {
       await initRepo(repo);
       expect(await currentBranchExists(repo, "specos/never-existed")).toBe(false);
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("discardStaleWorktree", () => {
+  it("removes a leftover worktree and branch, so createWorktree for the same task id succeeds again", async () => {
+    const repo = await mkdtemp(path.join(tmpdir(), "specos-stale-"));
+    try {
+      await initRepo(repo);
+      // Simulate a run that got killed mid-task: worktree + branch exist, nothing cleaned up.
+      await createWorktree(repo, "task-1", "main");
+
+      const discarded = await discardStaleWorktree(repo, "task-1");
+      expect(discarded).toBe(true);
+      expect(await currentBranchExists(repo, "specos/task-1")).toBe(false);
+
+      // The real regression: retrying used to fail here with "a branch ... already exists".
+      await expect(createWorktree(repo, "task-1", "main")).resolves.toMatchObject({ taskId: "task-1" });
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("is a no-op and returns false when there's nothing to discard", async () => {
+    const repo = await mkdtemp(path.join(tmpdir(), "specos-stale-"));
+    try {
+      await initRepo(repo);
+      expect(await discardStaleWorktree(repo, "never-ran")).toBe(false);
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("removes a residual directory left behind even when the branch is already gone", async () => {
+    const repo = await mkdtemp(path.join(tmpdir(), "specos-stale-"));
+    try {
+      await initRepo(repo);
+      // Observed live: `git worktree remove --force` can deregister the worktree and delete its
+      // branch cleanly, yet still leave a residual directory at the target path — which then
+      // makes the next `git worktree add` fail with "already exists" even though git itself has
+      // no record of the worktree or branch anymore. Reproduce that directly, since it can't be
+      // reproduced by just calling createWorktree/removeWorktree with well-behaved git.
+      const worktreePath = path.join(repo, ".specos", "worktrees", "task-1");
+      await mkdir(worktreePath, { recursive: true });
+      await writeFile(path.join(worktreePath, "leftover.txt"), "stray file\n", "utf-8");
+      expect(await currentBranchExists(repo, "specos/task-1")).toBe(false);
+
+      const discarded = await discardStaleWorktree(repo, "task-1");
+      expect(discarded).toBe(true);
+      await expect(access(worktreePath)).rejects.toThrow();
+
+      await expect(createWorktree(repo, "task-1", "main")).resolves.toMatchObject({ taskId: "task-1" });
     } finally {
       await rm(repo, { recursive: true, force: true });
     }
